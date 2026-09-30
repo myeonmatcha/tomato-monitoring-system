@@ -12,10 +12,18 @@ import numpy as np
 import os
 import datetime
 import cv2
+import urllib.request
 
 # ===== CONFIGURATION =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "tomato_maskrcnn.pth")
+
+# Fallback download URL (GitHub LFS media server)
+MODEL_DOWNLOAD_URL = (
+    "https://media.githubusercontent.com/media/"
+    "myeonmatcha/tomato-monitoring-system/main/models/tomato_maskrcnn.pth"
+)
+
 NUM_CLASSES = 3
 
 CLASS_NAMES = {1: "Ripe", 2: "Unripe"}
@@ -54,44 +62,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== LAZY MODEL LOADING =====
+# ===== LAZY MODEL LOADING WITH AUTO-DOWNLOAD =====
 _model = None
 
 
 def get_model():
-    """Load the model on first request instead of at startup."""
+    """Load the model on first request, downloading it if necessary."""
     global _model
     if _model is None:
         try:
-            print("Loading Mask R-CNN model (lazy load)...")
+            print("=" * 50)
+            print("Loading Mask R-CNN model...")
             print(f"Model path: {MODEL_PATH}")
-            print(f"Model exists: {os.path.exists(MODEL_PATH)}")
 
-            if os.path.exists(MODEL_PATH):
+            # ===== CHECK IF MODEL NEEDS DOWNLOADING =====
+            need_download = False
+
+            if not os.path.exists(MODEL_PATH):
+                print("[INFO] Model file not found. Downloading...")
+                need_download = True
+            else:
                 size = os.path.getsize(MODEL_PATH)
-                print(f"Model size: {size / (1024*1024):.1f} MB")
+                print(f"Model file size: {size / (1024*1024):.2f} MB")
 
+                # If file is under 100 MB, it's likely a Git LFS pointer (not a real model)
+                if size < 100 * 1024 * 1024:
+                    print(f"[WARN] Model file appears to be a Git LFS pointer ({size} bytes).")
+                    print("[INFO] Downloading real model from GitHub LFS...")
+                    need_download = True
+
+            # ===== DOWNLOAD IF NEEDED =====
+            if need_download:
+                os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+                print(f"Downloading from: {MODEL_DOWNLOAD_URL}")
+
+                try:
+                    urllib.request.urlretrieve(MODEL_DOWNLOAD_URL, MODEL_PATH)
+                    new_size = os.path.getsize(MODEL_PATH)
+                    print(f"[OK] Downloaded. New size: {new_size / (1024*1024):.2f} MB")
+
+                    if new_size < 100 * 1024 * 1024:
+                        raise Exception(
+                            f"Downloaded file is too small ({new_size} bytes). "
+                            "The URL may not serve the real binary."
+                        )
+                except Exception as dl_err:
+                    print(f"[ERROR] Download failed: {dl_err}")
+                    raise
+
+            # ===== BUILD MODEL ARCHITECTURE =====
+            print("Building Mask R-CNN architecture...")
             m = maskrcnn_resnet50_fpn(weights=None, weights_backbone=None)
 
             in_features = m.roi_heads.box_predictor.cls_score.in_features
             m.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
-            in_features_mask = m.roi_heads.mask_predictor.conv5_mask.in_channels
-            m.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, 256, NUM_CLASSES)
 
-            if os.path.exists(MODEL_PATH):
-                m.load_state_dict(
-                    torch.load(
-                        MODEL_PATH,
-                        map_location=torch.device('cpu'),
-                        weights_only=False
-                    )
+            in_features_mask = m.roi_heads.mask_predictor.conv5_mask.in_channels
+            m.roi_heads.mask_predictor = MaskRCNNPredictor(
+                in_features_mask, 256, NUM_CLASSES
+            )
+
+            # ===== LOAD WEIGHTS =====
+            print("Loading trained weights...")
+            m.load_state_dict(
+                torch.load(
+                    MODEL_PATH,
+                    map_location=torch.device('cpu'),
+                    weights_only=False
                 )
-                print("[OK] Trained model weights loaded successfully!")
-            else:
-                print(f"[WARN] No trained model found at {MODEL_PATH}.")
+            )
 
             m.eval()
             _model = m
+            print("[OK] Trained model weights loaded successfully!")
+            print("=" * 50)
+
         except Exception as e:
             import traceback
             print(f"[ERROR] Failed to load model: {e}")
@@ -100,7 +145,7 @@ def get_model():
     return _model
 
 
-# ===== HEALTHCHECK ENDPOINT (Instant Response for Railway) =====
+# ===== HEALTHCHECK ENDPOINT =====
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "model_loaded": _model is not None}
@@ -138,8 +183,11 @@ def extract_mean_hsv(image_np, mask_np):
     hsv_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
 
     if mask_np.shape != image_np.shape[:2]:
-        mask_np = cv2.resize(mask_np, (image_np.shape[1], image_np.shape[0]),
-                             interpolation=cv2.INTER_NEAREST)
+        mask_np = cv2.resize(
+            mask_np,
+            (image_np.shape[1], image_np.shape[0]),
+            interpolation=cv2.INTER_NEAREST
+        )
 
     mask_bool = mask_np > 0.5
     if mask_bool.sum() == 0:
@@ -159,7 +207,9 @@ def compute_circularity(mask_np):
         mask_np = cv2.resize(mask_np, (256, 256), interpolation=cv2.INTER_NEAREST)
 
     mask_binary = (mask_np > 0.5).astype(np.uint8)
-    contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(
+        mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
 
     if not contours:
         return 0.5
@@ -179,15 +229,17 @@ def compute_color_uniformity(image_np, mask_np):
     hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
 
     if mask_np.shape != image_np.shape[:2]:
-        mask_np = cv2.resize(mask_np, (image_np.shape[1], image_np.shape[0]),
-                             interpolation=cv2.INTER_NEAREST)
+        mask_np = cv2.resize(
+            mask_np,
+            (image_np.shape[1], image_np.shape[0]),
+            interpolation=cv2.INTER_NEAREST
+        )
 
     mask_bool = mask_np > 0.5
     if mask_bool.sum() < 100:
         return 0.5
 
     pixels = hsv[mask_bool]
-
     h_std = np.std(pixels[:, 0]) / 90.0
     s_std = np.std(pixels[:, 1]) / 128.0
     v_std = np.std(pixels[:, 2]) / 128.0
@@ -199,8 +251,11 @@ def compute_color_uniformity(image_np, mask_np):
 
 def compute_size_score(mask_np, image_np):
     if mask_np.shape != image_np.shape[:2]:
-        mask_np = cv2.resize(mask_np, (image_np.shape[1], image_np.shape[0]),
-                             interpolation=cv2.INTER_NEAREST)
+        mask_np = cv2.resize(
+            mask_np,
+            (image_np.shape[1], image_np.shape[0]),
+            interpolation=cv2.INTER_NEAREST
+        )
 
     mask_area = (mask_np > 0.5).sum()
     image_area = image_np.shape[0] * image_np.shape[1]
@@ -209,8 +264,7 @@ def compute_size_score(mask_np, image_np):
         return 0.5
 
     relative_size = mask_area / image_area
-    size_score = min(relative_size / 0.10, 1.0)
-    return size_score
+    return min(relative_size / 0.10, 1.0)
 
 
 def compute_quality_grade(image_np, mask_np, stage_8):
@@ -308,6 +362,7 @@ async def predict(file: UploadFile = File(...)):
         transform = T.Compose([T.ToTensor()])
         img_tensor = transform(image)
 
+        # Lazy load the model (downloads if needed)
         m = get_model()
 
         with torch.no_grad():
@@ -329,7 +384,9 @@ async def predict(file: UploadFile = File(...)):
                 mean_hsv = extract_mean_hsv(image_np, mask_np)
                 stage_8 = refine_to_8_stage(model_class, mean_hsv)
 
-                quality, quality_features = compute_quality_grade(image_np, mask_np, stage_8)
+                quality, quality_features = compute_quality_grade(
+                    image_np, mask_np, stage_8
+                )
                 readiness, days_to_harvest = determine_harvest_readiness(stage_8)
                 harvest_date = compute_harvest_date(days_to_harvest)
 
@@ -362,10 +419,13 @@ async def predict(file: UploadFile = File(...)):
                 "stages": STAGES_8,
             }
 
-        best = max(all_detections, key=lambda x: (
-            RIPENESS_PRIORITY.get(x["ripeness_stage"], 0),
-            x["confidence"]
-        ))
+        best = max(
+            all_detections,
+            key=lambda x: (
+                RIPENESS_PRIORITY.get(x["ripeness_stage"], 0),
+                x["confidence"]
+            )
+        )
 
         active_stage_index = (
             STAGES_8.index(best["ripeness_stage"])
@@ -396,9 +456,12 @@ async def predict(file: UploadFile = File(...)):
 # ===== STARTUP =====
 @app.on_event("startup")
 async def warmup():
-    print("[OK] Server started. Model loading in background...")
+    print("=" * 50)
+    print("[OK] Server started.")
     port = int(os.environ.get("PORT", 8000))
     print(f"Running on port {port}")
+    print("Model will be downloaded and loaded on first request.")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
