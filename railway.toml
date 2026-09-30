@@ -1,8 +1,9 @@
+# Cache buster v3
 [build]
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "bash -c 'echo \"Downloading model...\" && curl -L -o models/tomato_maskrcnn.pth https://media.githubusercontent.com/media/myeonmatcha/tomato-monitoring-system/main/models/tomato_maskrcnn.pth && echo \"Model downloaded\" && uvicorn main:app --host 0.0.0.0 --port $PORT'"
+startCommand = "bash -c 'echo \"Downloading model...\" && curl -L -o models/tomato_maskrcnn.pth https://media.githubusercontent.com/media/myeonmatcha/tomato-monitoring-system/main/models/tomato_maskrcnn.pth && echo \"Model downloaded: $(ls -lh models/tomato_maskrcnn.pth)\" && uvicorn main:app --host 0.0.0.0 --port $PORT'"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
