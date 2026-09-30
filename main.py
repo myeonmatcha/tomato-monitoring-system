@@ -54,13 +54,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ===== HEALTHCHECK ENDPOINT (Instant Response for Railway) =====
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "model_loaded": _model is not None}
-
-
 # ===== LAZY MODEL LOADING =====
 _model = None
 
@@ -69,23 +62,48 @@ def get_model():
     """Load the model on first request instead of at startup."""
     global _model
     if _model is None:
-        print("Loading Mask R-CNN model (lazy load)...")
-        m = maskrcnn_resnet50_fpn(weights=None, weights_backbone=None)
+        try:
+            print("Loading Mask R-CNN model (lazy load)...")
+            print(f"Model path: {MODEL_PATH}")
+            print(f"Model exists: {os.path.exists(MODEL_PATH)}")
 
-        in_features = m.roi_heads.box_predictor.cls_score.in_features
-        m.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
-        in_features_mask = m.roi_heads.mask_predictor.conv5_mask.in_channels
-        m.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, 256, NUM_CLASSES)
+            if os.path.exists(MODEL_PATH):
+                size = os.path.getsize(MODEL_PATH)
+                print(f"Model size: {size / (1024*1024):.1f} MB")
 
-        if os.path.exists(MODEL_PATH):
-            m.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
-            print("[OK] Trained model weights loaded successfully!")
-        else:
-            print(f"[WARN] No trained model found at {MODEL_PATH}.")
+            m = maskrcnn_resnet50_fpn(weights=None, weights_backbone=None)
 
-        m.eval()
-        _model = m
+            in_features = m.roi_heads.box_predictor.cls_score.in_features
+            m.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
+            in_features_mask = m.roi_heads.mask_predictor.conv5_mask.in_channels
+            m.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, 256, NUM_CLASSES)
+
+            if os.path.exists(MODEL_PATH):
+                m.load_state_dict(
+                    torch.load(
+                        MODEL_PATH,
+                        map_location=torch.device('cpu'),
+                        weights_only=False
+                    )
+                )
+                print("[OK] Trained model weights loaded successfully!")
+            else:
+                print(f"[WARN] No trained model found at {MODEL_PATH}.")
+
+            m.eval()
+            _model = m
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] Failed to load model: {e}")
+            traceback.print_exc()
+            raise
     return _model
+
+
+# ===== HEALTHCHECK ENDPOINT (Instant Response for Railway) =====
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "model_loaded": _model is not None}
 
 
 # ===== HSV REFINEMENT (3-class -> 8-stage) =====
@@ -290,7 +308,6 @@ async def predict(file: UploadFile = File(...)):
         transform = T.Compose([T.ToTensor()])
         img_tensor = transform(image)
 
-        # Lazy load the model
         m = get_model()
 
         with torch.no_grad():
@@ -371,16 +388,15 @@ async def predict(file: UploadFile = File(...)):
         }
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ===== STARTUP (Optional warm-up in background) =====
+# ===== STARTUP =====
 @app.on_event("startup")
 async def warmup():
-    import threading
-    threading.Thread(target=get_model, daemon=True).start()
     print("[OK] Server started. Model loading in background...")
-
     port = int(os.environ.get("PORT", 8000))
     print(f"Running on port {port}")
 
