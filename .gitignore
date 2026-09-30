@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+.env
+build_log.txt
+evaluation_results.json
