@@ -20,8 +20,6 @@ NUM_CLASSES = 3
 
 CLASS_NAMES = {1: "Ripe", 2: "Unripe"}
 
-# ===== CONFIDENCE THRESHOLD =====
-# Lowered to 0.25 to detect tomatoes in complex real-world images
 CONFIDENCE_THRESHOLD = 0.25
 
 STAGES_8 = [
@@ -46,6 +44,7 @@ RIPENESS_PRIORITY = {
     "Over Ripe": 8,
 }
 
+# ===== INITIALIZE FASTAPI =====
 app = FastAPI(title="Tomato Monitoring System API")
 
 app.add_middleware(
@@ -55,51 +54,53 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== LOAD MODEL =====
-print("Loading Mask R-CNN model...")
-model = maskrcnn_resnet50_fpn(weights=None, weights_backbone=None)
 
-in_features = model.roi_heads.box_predictor.cls_score.in_features
-model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
-in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
-model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, 256, NUM_CLASSES)
+# ===== HEALTHCHECK ENDPOINT (Instant Response for Railway) =====
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "model_loaded": _model is not None}
 
-if os.path.exists(MODEL_PATH):
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
-    print("[OK] Trained model weights loaded successfully!")
-else:
-    print(f"[WARN] No trained model found at {MODEL_PATH}.")
 
-model.eval()
+# ===== LAZY MODEL LOADING =====
+_model = None
+
+
+def get_model():
+    """Load the model on first request instead of at startup."""
+    global _model
+    if _model is None:
+        print("Loading Mask R-CNN model (lazy load)...")
+        m = maskrcnn_resnet50_fpn(weights=None, weights_backbone=None)
+
+        in_features = m.roi_heads.box_predictor.cls_score.in_features
+        m.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
+        in_features_mask = m.roi_heads.mask_predictor.conv5_mask.in_channels
+        m.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, 256, NUM_CLASSES)
+
+        if os.path.exists(MODEL_PATH):
+            m.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
+            print("[OK] Trained model weights loaded successfully!")
+        else:
+            print(f"[WARN] No trained model found at {MODEL_PATH}.")
+
+        m.eval()
+        _model = m
+    return _model
 
 
 # ===== HSV REFINEMENT (3-class -> 8-stage) =====
 def refine_to_8_stage(model_class, mean_hsv):
-    """
-    Refine a 3-class model prediction into one of 8 ripeness stages
-    using HSV color analysis of the detected tomato mask.
-
-    HSV ranges (OpenCV):
-      Hue (H): 0-179  (0=red, 30=yellow, 60=green, 90=cyan, 120=blue, 150=magenta)
-      Saturation (S): 0-255 (0=grey, 255=fully saturated)
-      Value (V): 0-255 (0=black, 255=full brightness)
-    """
     h, s, v = mean_hsv
 
     if model_class == "Unripe":
-        # Green/yellow tomatoes - subdivide by saturation
         if s > 180:
             return "Immature Green"
         elif s > 130:
             return "Mature Green"
         else:
             return "Breaker"
-
     elif model_class == "Ripe":
-        # Red/orange tomatoes - subdivide by hue and brightness
         if h < 10:
-            # Red hue zone: distinguish Ripe vs Over Ripe
-            # Over Ripe = VERY dark (v < 110) AND dull (s < 180)
             if v < 110 and s < 180:
                 return "Over Ripe"
             elif v < 130:
@@ -112,7 +113,6 @@ def refine_to_8_stage(model_class, mean_hsv):
             return "Pink"
         else:
             return "Turning"
-
     return "Unknown"
 
 
@@ -290,8 +290,11 @@ async def predict(file: UploadFile = File(...)):
         transform = T.Compose([T.ToTensor()])
         img_tensor = transform(image)
 
+        # Lazy load the model
+        m = get_model()
+
         with torch.no_grad():
-            prediction = model([img_tensor])
+            prediction = m([img_tensor])
 
         scores = prediction[0]['scores'].cpu().numpy()
         labels = prediction[0]['labels'].cpu().numpy()
@@ -369,6 +372,17 @@ async def predict(file: UploadFile = File(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== STARTUP (Optional warm-up in background) =====
+@app.on_event("startup")
+async def warmup():
+    import threading
+    threading.Thread(target=get_model, daemon=True).start()
+    print("[OK] Server started. Model loading in background...")
+
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Running on port {port}")
 
 
 if __name__ == "__main__":
