@@ -29,3 +29,4 @@ check_model.py
 test_hybrid.py
 test_ai.py
 test_setup.py
+test_quantized.py

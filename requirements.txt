@@ -4,5 +4,5 @@ python-multipart
 pillow
 numpy
 opencv-python-headless
-torch==2.5.0
-torchvision==0.20.0
+torch==2.5.1
+torchvision==0.20.1
