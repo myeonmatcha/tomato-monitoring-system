@@ -19,7 +19,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "tomato_maskrcnn.pth")
 
 MODEL_DOWNLOAD_URL = (
-   "https://media.githubusercontent.com/media/"
+    "https://media.githubusercontent.com/media/"
     "myeonmatcha/tomato-monitoring-system/main/models/tomato_maskrcnn.pth"
 )
 
@@ -52,7 +52,6 @@ _model = None
 
 
 def get_model():
-    """Load the model on first request, downloading it if necessary."""
     global _model
     if _model is None:
         try:
@@ -82,8 +81,7 @@ def get_model():
                     print(f"[OK] Downloaded. New size: {new_size / (1024*1024):.2f} MB")
                     if new_size < 100 * 1024 * 1024:
                         raise Exception(
-                            f"Downloaded file is too small ({new_size} bytes). "
-                            "The URL may not serve the real binary."
+                            f"Downloaded file is too small ({new_size} bytes)."
                         )
                 except Exception as dl_err:
                     print(f"[ERROR] Download failed: {dl_err}")
@@ -205,29 +203,70 @@ def compute_quality_grade(image_np, mask_np, stage_8):
     circularity = compute_circularity(mask_np)
     uniformity = compute_color_uniformity(image_np, mask_np)
     size_score = compute_size_score(mask_np, image_np)
+
     score = (circularity * 0.35) + (uniformity * 0.45) + (size_score * 0.20)
+
     if stage_8 == "Over Ripe":
         score -= 0.20
     elif stage_8 == "Immature Green":
         score -= 0.10
+
     score = max(0.0, min(score, 1.0))
 
+    # ===== ENHANCED DECISION SUPPORT (Adviser Feedback) =====
     if score >= 0.85:
         grade = "A"
         description = "Excellent Quality — Suitable for export and premium market"
-        recommendation = "Best for fresh consumption, export, or premium retail display."
+        recommendation = (
+            "• Harvest now for best quality and taste.\n"
+            "• Handle carefully to avoid bruising.\n"
+            "• Store at 10–12°C for up to 2 weeks.\n"
+            "• Suitable for fresh market, export, and premium retail."
+        )
     elif score >= 0.70:
         grade = "B"
         description = "Good Quality — Suitable for local market"
-        recommendation = "Ideal for local markets, supermarkets, or direct consumer sale."
+        recommendation = (
+            "• Ideal for local markets and direct consumer sale.\n"
+            "• Monitor for pests and diseases weekly.\n"
+            "• Store at 12–15°C in a well-ventilated area.\n"
+            "• Inspect the plant for yellowing leaves — remove if found."
+        )
     elif score >= 0.50:
         grade = "C"
         description = "Moderate Quality — Suitable for processing"
-        recommendation = "Best used for sauces, ketchup, canning, or juice processing."
+        recommendation = (
+            "• Best used for sauces, ketchup, canning, or juice.\n"
+            "• Process within 2–3 days to avoid spoilage.\n"
+            "• Check for soft spots and bruises.\n"
+            "• Apply potassium-rich fertilizer to improve fruit quality."
+        )
     else:
         grade = "D"
         description = "Poor Quality — Not suitable for consumption"
-        recommendation = "Reject or discard. May be used for composting or animal feed."
+        recommendation = (
+            "• Discard or use for composting only.\n"
+            "• Inspect plant for signs of disease or pest infestation.\n"
+            "• Remove affected fruits from the field to prevent spread.\n"
+            "• Apply appropriate fungicide or pesticide if disease is confirmed."
+        )
+
+    # ===== Additional care advice by ripeness stage =====
+    if stage_8 in ["Immature Green", "Mature Green"]:
+        recommendation += (
+            "\n• Apply phosphorus-rich fertilizer to support fruit development.\n"
+            "• Ensure adequate sunlight (6–8 hours daily)."
+        )
+    elif stage_8 == "Breaker":
+        recommendation += (
+            "\n• Reduce watering slightly to concentrate sugars.\n"
+            "• Check for sunscald — provide shade if needed."
+        )
+    elif stage_8 == "Over Ripe":
+        recommendation += (
+            "\n• Do not sell or ship — quality is compromised.\n"
+            "• Use immediately for processing or discard."
+        )
 
     features = {
         "circularity": round(circularity, 3),
