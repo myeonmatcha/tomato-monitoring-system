@@ -20,7 +20,7 @@ MODEL_PATH = os.path.join(BASE_DIR, "models", "tomato_maskrcnn.pth")
 
 MODEL_DOWNLOAD_URL = (
    "https://media.githubusercontent.com/media/"
-    "myeonmatcha/tomato-monitoring-system/main/models/tomato_maskrcnn_quantized.pth"
+    "myeonmatcha/tomato-monitoring-system/main/models/tomato_maskrcnn.pth"
 )
 
 NUM_CLASSES = 3
